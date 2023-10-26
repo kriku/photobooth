@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+cd "$(dirname "$0")"
+
+if test -f ./run.pid; then
+    ./stop.sh
+else
+    ./run.sh
+fi
