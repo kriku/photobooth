@@ -6,10 +6,14 @@
 #include <glib-unix.h>
 #include <dlfcn.h>
 
+#include <sys/stat.h>
+#include <ctime>
 #include <cstring>
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <string>
+#include <algorithm>
 
 using namespace std;
 
@@ -24,7 +28,7 @@ static int frame_count = 0;
 static void appsink_eos(GstAppSink * appsink, gpointer user_data)
 {
     printf("app sink receive eos\n");
-//    g_main_loop_quit (hpipe->loop);
+    // g_main_loop_quit (main_loop);
 }
 
 static GstFlowReturn new_buffer(GstAppSink *appsink, gpointer user_data)
@@ -34,14 +38,16 @@ static GstFlowReturn new_buffer(GstAppSink *appsink, gpointer user_data)
     frame_count ++;
     printf("frame count %d\n", frame_count);
 
+    // sample = gst_app_sink_pull_sample (appsink);
+
+    g_signal_emit_by_name (appsink, "pull-sample", &sample, NULL);
+
     if (frame_count % 50 != 0) {
-        g_signal_emit_by_name (appsink, "pull-sample", &sample, NULL);
+        gst_sample_unref (sample);
         return GST_FLOW_OK;
     }
 
     printf("lets make a snapshot\n");
-
-    g_signal_emit_by_name (appsink, "pull-sample", &sample, NULL);
 
     if (sample)
     {
@@ -57,10 +63,10 @@ static GstFlowReturn new_buffer(GstAppSink *appsink, gpointer user_data)
         gst_caps_get_structure (caps, 0);
         buffer = gst_sample_get_buffer (sample);
 
-        gst_buffer_ref(buffer);
+        gst_buffer_ref (buffer);
         g_signal_emit_by_name (appsrc_, "push-buffer", buffer, &ret);
 
-        gst_buffer_unref(buffer);
+        gst_buffer_unref (buffer);
         gst_sample_unref (sample);
     }
     else
@@ -75,14 +81,34 @@ int main(int argc, char** argv) {
     USE(argc);
     USE(argv);
 
+    // current date/time based on current system
+    time_t now = time(0);
+    // convert now to tm struct for UTC
+    tm *gmtm = gmtime(&now);
+    // convert now to string form
+    char* current_date = asctime(gmtm);
+
+    string current_date_str(current_date);
+    current_date_str.erase(
+        remove(current_date_str.begin(), current_date_str.end(), '\n'),
+        current_date_str.cend()
+    );
+    const char* current_date_final = current_date_str.c_str();
+
+    mkdir(current_date_final, 0777);
+
     gst_init (&argc, &argv);
 
     GMainLoop *main_loop;
     main_loop = g_main_loop_new (NULL, FALSE);
     ostringstream launch_stream;
+
+    // 4k
     // 3840 x 2160
-    // 4032 3040
-    // 1432 1080
+
+    // max resolution
+    // 4032 x 3040
+    // 1432 x 1080 (fit fullhd display)
 
     int sensor_width = 3840;
     int sensor_height = 2160;
@@ -93,18 +119,27 @@ int main(int argc, char** argv) {
 
     GstAppSinkCallbacks callbacks = {appsink_eos, NULL, new_buffer};
 
-    // << "t1. ! queue ! nvvidconv ! "
     launch_stream
+    // camera source
     << "nvarguscamerasrc ! "
     << "video/x-raw(memory:NVMM), "
-    << "width="<< sensor_width <<", height="<< sensor_height <<", framerate=30/1 ! "
+    << "width=" << sensor_width << ", "
+    << "height=" << sensor_height << ", "
+    << "framerate=30/1 ! "
+    // create tee duplicator
     << "tee name=t1 "
     << "t1. ! queue ! nvvidconv flip-method=7 ! "
+    // output to hdmi0
     << "video/x-raw(memory:NVMM), "
-    << "width="<< screen_width <<", height="<< screen_height <<", framerate=30/1 ! "
-    << " nvoverlaysink "
-    << "t1. ! queue ! nvvidconv ! "
-    << "video/x-raw, format=I420, width="<< image_width <<", height="<< image_height <<" ! "
+    << "width=" << screen_width << ", "
+    << "height=" << screen_height << ", "
+    << "framerate=30/1 ! "
+    << "nvoverlaysink "
+    // pipe to jpegenc
+    << "t1. ! queue ! nvvidconv flip-method=5 ! "
+    << "video/x-raw, format=I420, "
+    << "width=" << image_height << ", "
+    << "height=" << image_width << " ! "
     << "appsink name=mysink ";
 
     launch_string = launch_stream.str();
@@ -128,11 +163,15 @@ int main(int argc, char** argv) {
     {
         launch_stream.str("");
         launch_stream.clear();
+
         launch_stream
         << "appsrc name=mysource ! "
-        << "video/x-raw,width="<< image_width <<",height="<< image_height <<",format=I420,framerate=1/1 ! "
+        << "video/x-raw, "
+        << "width=" << image_height << ", "
+        << "height=" << image_width << ", "
+        << "format=I420, framerate=1/1 ! "
         << "nvjpegenc ! "
-        << "multifilesink location=snap-%03d.jpg ";
+        << "multifilesink location=\"" << current_date_final << "/snap-%03d.jpg\" ";
 
         launch_string = launch_stream.str();
 
@@ -143,7 +182,9 @@ int main(int argc, char** argv) {
             g_print( "Failed to parse jpeg launch: %s\n", error->message);
             return -1;
         }
-        if(error) g_error_free(error);
+
+        if (error) g_error_free(error);
+
         appsrc_ = gst_bin_get_by_name(GST_BIN(gst_jpgenc), "mysource");
         gst_app_src_set_stream_type(GST_APP_SRC(appsrc_), GST_APP_STREAM_TYPE_STREAM);
     }
@@ -151,8 +192,8 @@ int main(int argc, char** argv) {
     gst_element_set_state((GstElement*)gst_jpgenc, GST_STATE_PLAYING);
     gst_element_set_state((GstElement*)gst_preview, GST_STATE_PLAYING);
 
-    sleep(5);
-    // g_main_loop_run(main_loop);
+    // sleep(5);
+    g_main_loop_run (main_loop);
 
     gst_element_set_state((GstElement*)gst_preview, GST_STATE_NULL);
     gst_object_unref(GST_OBJECT(gst_preview));
@@ -161,6 +202,7 @@ int main(int argc, char** argv) {
     // Wait for EOS message
     GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(gst_jpgenc));
     gst_bus_poll(bus, GST_MESSAGE_EOS, GST_CLOCK_TIME_NONE);
+
     gst_element_set_state((GstElement*)gst_jpgenc, GST_STATE_NULL);
     gst_object_unref(GST_OBJECT(gst_jpgenc));
 
