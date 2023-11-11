@@ -6,14 +6,16 @@
 #include <glib-unix.h>
 #include <dlfcn.h>
 
-#include <sys/stat.h>
-#include <ctime>
+#include <algorithm>
 #include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <fstream>
 #include <iostream>
 #include <sstream>
-#include <thread>
 #include <string>
-#include <algorithm>
+#include <sys/stat.h>
+#include <thread>
 
 using namespace std;
 
@@ -25,10 +27,13 @@ static string launch_string;
 static GstElement *appsrc_;
 static int frame_count = 0;
 
+static fstream should_snap_file ("should_snap", ios::in | ios::out | ios::binary);
+static char should_snap[1];
+static char stop_snap[1] = {'0'};
+
 static void appsink_eos(GstAppSink * appsink, gpointer user_data)
 {
     printf("app sink receive eos\n");
-    // g_main_loop_quit (main_loop);
 }
 
 static GstFlowReturn new_buffer(GstAppSink *appsink, gpointer user_data)
@@ -36,18 +41,25 @@ static GstFlowReturn new_buffer(GstAppSink *appsink, gpointer user_data)
     GstSample *sample = NULL;
 
     frame_count ++;
-    printf("frame count %d\n", frame_count);
-
-    // sample = gst_app_sink_pull_sample (appsink);
 
     g_signal_emit_by_name (appsink, "pull-sample", &sample, NULL);
 
-    if (frame_count % 50 != 0) {
+    should_snap_file.seekg (0, ios::beg);
+    should_snap_file.read (should_snap, 1);
+
+    if (!should_snap_file) {
+        printf("couldn't read should_snap file\n");
         gst_sample_unref (sample);
         return GST_FLOW_OK;
     }
 
-    printf("lets make a snapshot\n");
+    if (should_snap[0] != '1') {
+        gst_sample_unref (sample);
+        return GST_FLOW_OK;
+    }
+
+    should_snap_file.seekg (0, ios::beg);
+    should_snap_file.write (stop_snap, 1);
 
     if (sample)
     {
@@ -81,18 +93,13 @@ int main(int argc, char** argv) {
     USE(argc);
     USE(argv);
 
-    // current date/time based on current system
     time_t now = time(0);
-    // convert now to tm struct for UTC
     tm *gmtm = gmtime(&now);
-    // convert now to string form
-    char* current_date = asctime(gmtm);
+    ostringstream current_date_str_stream;
+    current_date_str_stream << put_time(gmtm, "%Y-%m-%d_%H-%M-%S");
 
-    string current_date_str(current_date);
-    current_date_str.erase(
-        remove(current_date_str.begin(), current_date_str.end(), '\n'),
-        current_date_str.cend()
-    );
+    string current_date_str = current_date_str_stream.str();
+
     const char* current_date_final = current_date_str.c_str();
 
     mkdir(current_date_final, 0777);
@@ -192,7 +199,6 @@ int main(int argc, char** argv) {
     gst_element_set_state((GstElement*)gst_jpgenc, GST_STATE_PLAYING);
     gst_element_set_state((GstElement*)gst_preview, GST_STATE_PLAYING);
 
-    // sleep(5);
     g_main_loop_run (main_loop);
 
     gst_element_set_state((GstElement*)gst_preview, GST_STATE_NULL);
